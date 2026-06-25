@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, Protocol
 
 import httpx
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from cfa_vocab_bot.config import Settings
@@ -26,6 +26,8 @@ from cfa_vocab_bot.services.duplicate import find_duplicate, normalize_term
 logger = logging.getLogger(__name__)
 
 MAX_RESEARCH_NUMBER = 25
+MAX_RESEARCH_ATTEMPTS = 3
+MAX_EXCLUDED_TERMS_IN_PROMPT = 150
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
@@ -34,7 +36,9 @@ class ResearchUnavailable(RuntimeError):
 
 
 class ResearchProvider(Protocol):
-    async def research(self, *, topic: str, number: int) -> list[ResearchCandidate]:
+    async def research(
+        self, *, topic: str, number: int, exclude_terms: Sequence[str] = ()
+    ) -> list[ResearchCandidate]:
         ...
 
 
@@ -120,11 +124,21 @@ class OpenAIWebResearchProvider:
         self.model = model
         self.timeout_seconds = timeout_seconds
 
-    async def research(self, *, topic: str, number: int) -> list[ResearchCandidate]:
+    async def research(
+        self, *, topic: str, number: int, exclude_terms: Sequence[str] = ()
+    ) -> list[ResearchCandidate]:
         if not self.api_key:
             raise ResearchUnavailable("OPENAI_API_KEY is not configured.")
 
-        requested = min(max(number * 2, number), MAX_RESEARCH_NUMBER * 2)
+        requested = min(max(number * 3, number), MAX_RESEARCH_NUMBER * 2)
+        excluded = [term for term in exclude_terms if term.strip()][:MAX_EXCLUDED_TERMS_IN_PROMPT]
+        excluded_text = ""
+        if excluded:
+            excluded_text = (
+                "\nDo not return any of these terms or aliases because they already exist "
+                "in the user's vocabulary pool for this topic:\n- "
+                + "\n- ".join(excluded)
+            )
         instructions = (
             "You are a CFA Level I vocabulary research assistant. Search the public web broadly "
             "for CFA Level I-relevant vocabulary and phrases. Prioritize official CFA Institute "
@@ -138,7 +152,8 @@ class OpenAIWebResearchProvider:
             f"Research CFA Level I vocabulary for topic: {topic}.\n"
             f"Return the top {requested} candidate terms or phrases. Rank by topic relevance, "
             "exam usefulness, difficulty/trap value, and practical value when reading English CFA "
-            "question stems."
+            "question stems. Return only terms that are not already in the user's pool."
+            f"{excluded_text}"
         )
         body = {
             "model": self.model,
@@ -210,6 +225,56 @@ def _already_pending(session: Session, user: User, normalized_term: str, topic: 
     )
 
 
+def _topic_filter(topic: str):
+    return func.lower(VocabItem.topic) == topic.lower()
+
+
+def existing_topic_terms_and_aliases(session: Session, topic: str) -> list[str]:
+    """Return display terms and aliases already present for a topic's vocab pool."""
+
+    terms = list(
+        session.scalars(
+            select(VocabItem.term)
+            .where(_topic_filter(topic), VocabItem.status == "active")
+            .order_by(VocabItem.term.asc())
+        )
+    )
+    aliases = list(
+        session.scalars(
+            select(VocabAlias.alias)
+            .join(VocabItem, VocabItem.id == VocabAlias.vocab_id)
+            .where(_topic_filter(topic), VocabItem.status == "active")
+            .order_by(VocabAlias.alias.asc())
+        )
+    )
+    unique: dict[str, str] = {}
+    for term in [*terms, *aliases]:
+        unique.setdefault(term.casefold(), term)
+    return list(unique.values())
+
+
+def existing_normalized_terms_for_topic(session: Session, user: User, topic: str) -> set[str]:
+    normalized = {normalize_term(term) for term in existing_topic_terms_and_aliases(session, topic)}
+    pending_rows = session.execute(
+        select(ResearchSuggestion.term, ResearchSuggestion.aliases).where(
+            ResearchSuggestion.user_id == user.id,
+            func.lower(ResearchSuggestion.topic) == topic.lower(),
+            ResearchSuggestion.status.in_(["suggested", "approved"]),
+        )
+    ).all()
+    for term, aliases in pending_rows:
+        normalized.add(normalize_term(term))
+        for alias in aliases or []:
+            normalized.add(normalize_term(alias))
+    return normalized
+
+
+def _candidate_normalized_terms(candidate: ResearchCandidate) -> set[str]:
+    normalized = {normalize_term(candidate.term)}
+    normalized.update(normalize_term(alias) for alias in candidate.aliases if alias.strip())
+    return {term for term in normalized if term}
+
+
 def store_research_candidates(
     session: Session,
     *,
@@ -218,19 +283,26 @@ def store_research_candidates(
     requested_number: int,
     candidates: Sequence[ResearchCandidate],
     model_name: str | None = None,
+    exclude_normalized_terms: Iterable[str] = (),
 ) -> list[ResearchSuggestion]:
     suggestions: list[ResearchSuggestion] = []
     raw_output = {"topic": topic, "requested_number": requested_number, "candidates": []}
+    seen_normalized = set(exclude_normalized_terms)
 
     for candidate in candidates:
         if len(suggestions) >= requested_number:
             break
+        candidate_norms = _candidate_normalized_terms(candidate)
         normalized = normalize_term(candidate.term)
-        candidate_topic = candidate.topic or topic
+        candidate_topic = topic
         raw_output["candidates"].append(candidate.model_dump())
+        if candidate_norms & seen_normalized:
+            continue
         if find_duplicate(session, candidate.term, candidate_topic) is not None:
+            seen_normalized.update(candidate_norms)
             continue
         if _already_pending(session, user, normalized, candidate_topic):
+            seen_normalized.update(candidate_norms)
             continue
         suggestion = ResearchSuggestion(
             user_id=user.id,
@@ -253,6 +325,7 @@ def store_research_candidates(
         )
         session.add(suggestion)
         suggestions.append(suggestion)
+        seen_normalized.update(candidate_norms)
 
     session.add(
         ContentGenerationLog(
@@ -277,15 +350,37 @@ async def research_topic(
     model_name: str | None = None,
 ) -> list[ResearchSuggestion]:
     safe_number = min(max(number, 1), MAX_RESEARCH_NUMBER)
-    candidates = await provider.research(topic=topic, number=safe_number)
-    return store_research_candidates(
-        session,
-        user=user,
-        topic=topic,
-        requested_number=safe_number,
-        candidates=candidates,
-        model_name=model_name,
-    )
+    suggestions: list[ResearchSuggestion] = []
+    excluded_display_terms = existing_topic_terms_and_aliases(session, topic)
+    excluded_normalized = existing_normalized_terms_for_topic(session, user, topic)
+
+    for _attempt in range(MAX_RESEARCH_ATTEMPTS):
+        remaining = safe_number - len(suggestions)
+        if remaining <= 0:
+            break
+        candidates = await provider.research(
+            topic=topic,
+            number=max(remaining, safe_number),
+            exclude_terms=excluded_display_terms + [suggestion.term for suggestion in suggestions],
+        )
+        batch = store_research_candidates(
+            session,
+            user=user,
+            topic=topic,
+            requested_number=remaining,
+            candidates=candidates,
+            model_name=model_name,
+            exclude_normalized_terms=excluded_normalized,
+        )
+        suggestions.extend(batch)
+        if not batch and not candidates:
+            break
+        for suggestion in batch:
+            excluded_display_terms.extend([suggestion.term, *suggestion.aliases])
+            excluded_normalized.add(suggestion.normalized_term)
+            excluded_normalized.update(normalize_term(alias) for alias in suggestion.aliases)
+
+    return suggestions[:safe_number]
 
 
 def approve_research_suggestion(

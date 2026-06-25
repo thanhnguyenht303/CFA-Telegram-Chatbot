@@ -46,8 +46,10 @@ from cfa_vocab_bot.services.research import (
     research_topic,
 )
 from cfa_vocab_bot.services.spaced_repetition import apply_review_result, get_or_create_review_state
+from cfa_vocab_bot.services.topics import available_topic_counts
 from cfa_vocab_bot.services.users import ensure_user, get_user_by_chat_id
 from cfa_vocab_bot.telegram.formatters import (
+    format_available_topics,
     format_daily_vocab,
     format_mini_review,
     format_quiz_question,
@@ -63,6 +65,7 @@ COMMANDS = [
     BotCommand("progress", "Show learning progress"),
     BotCommand("weak", "Show weak words"),
     BotCommand("topic", "Show current CFA topic"),
+    BotCommand("topics_display", "Show vocab topics in the pool"),
     BotCommand("nextweek", "Preview next topic"),
     BotCommand("pause", "Pause scheduled messages"),
     BotCommand("resume", "Resume scheduled messages"),
@@ -186,6 +189,14 @@ async def topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if plan
             else "No current topic. Upload a timeline CSV or JSON."
         )
+        await update.effective_message.reply_text(text)
+
+
+async def topics_display(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _session_factory(context)() as session:
+        _ensure_user_from_update(session, update, _settings(context))
+        text = format_available_topics(available_topic_counts(session))
+        session.commit()
         await update.effective_message.reply_text(text)
 
 
@@ -518,6 +529,10 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("progress", progress))
     application.add_handler(CommandHandler("weak", weak))
     application.add_handler(CommandHandler("topic", topic))
+    application.add_handler(CommandHandler("topics_display", topics_display))
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^/topics-display(@\w+)?(?:\s|$)"), topics_display)
+    )
     application.add_handler(CommandHandler("nextweek", nextweek))
     application.add_handler(CommandHandler("pause", pause))
     application.add_handler(CommandHandler("resume", resume))

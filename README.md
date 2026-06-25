@@ -6,7 +6,7 @@ The implementation follows the attached product spec as the source of truth. Whe
 
 ## Features
 
-- Telegram commands: `/start`, `/today`, `/review`, `/quiz`, `/progress`, `/weak`, `/topic`, `/nextweek`, `/pause`, `/resume`, `/settings`, `/export`, `/research`, `/export_my_data`, `/delete_my_data`, `/error`.
+- Telegram commands: `/start`, `/today`, `/review`, `/quiz`, `/progress`, `/weak`, `/topic`, `/topics-display`, `/topics_display`, `/nextweek`, `/pause`, `/resume`, `/settings`, `/export`, `/research`, `/export_my_data`, `/delete_my_data`, `/error`.
 - `/research <topic> <number>` uses OpenAI web research to propose new CFA Level I terms, then adds only user-approved terms to the learning database.
 - Scheduled messages with per-user timezone support:
   - Monday-Friday 07:30: 5 new vocab/phrases.
@@ -164,6 +164,7 @@ Examples:
 /settings daily_send_time 07:30
 /settings daily_vocab_count 5
 /settings exam_date 2027-02-20
+/topics-display
 /research Fixed Income 10
 /export csv
 /export anki
@@ -181,6 +182,8 @@ Inline buttons update mastery and review state:
 
 Callback data is intentionally short, for example `know:123`, `review:123`, and `quiz:8:4:B`.
 
+`/topics-display` shows all active approved vocab topics already available in the pool, with word counts. Telegram's official command menu only supports letters, numbers, and underscores, so `/topics_display` is registered in the menu and `/topics-display` is supported as a typed alias.
+
 ## Research Workflow
 
 `/research <topic> <number>` calls the OpenAI Responses API with web search enabled. The prompt asks the model to search public CFA Level I-relevant resources, prioritize useful terms for the requested topic, avoid verbatim paid/copyrighted explanations, and return structured candidates with source tracking.
@@ -193,11 +196,13 @@ Example:
 
 The bot then:
 
-1. Requests more than the requested count so duplicates can be filtered.
-2. Removes terms already covered by `vocab_items` or aliases.
-3. Saves remaining terms to `research_suggestions` with `status = suggested`.
-4. Shows a compact suggestion list with Approve/Reject buttons.
-5. Creates an active `vocab_items` row only when you approve a suggestion.
+1. Builds an exclusion list from existing terms and aliases for the requested topic.
+2. Asks OpenAI to avoid those existing terms before generating candidates.
+3. Requests extra candidates and retries when duplicate filtering leaves fewer than the requested count.
+4. Removes terms already covered by `vocab_items`, aliases, or pending suggestions.
+5. Saves remaining terms to `research_suggestions` with `status = suggested`.
+6. Shows a compact suggestion list with Approve/Reject buttons.
+7. Creates an active `vocab_items` row only when you approve a suggestion.
 
 Approved research terms use `qa_status = approved`, are source-tracked in `vocab_sources`, and become eligible for daily delivery. They do not count as learned until they are delivered or reviewed.
 

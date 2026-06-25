@@ -91,3 +91,13 @@ def format_research_suggestions(suggestions: Sequence[ResearchSuggestion]) -> st
             f"{source_note}"
         )
     return "\n\n".join(lines)
+
+
+def format_available_topics(topic_counts: Sequence[tuple[str, int]]) -> str:
+    if not topic_counts:
+        return "No active approved vocab topics are available yet."
+    lines = ["Available vocab topics"]
+    for topic, count in topic_counts:
+        word = "word" if count == 1 else "words"
+        lines.append(f"- {topic}: {count} {word}")
+    return "\n".join(lines)

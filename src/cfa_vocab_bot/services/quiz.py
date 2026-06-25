@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
+import re
 from collections.abc import Sequence
 
 from sqlalchemy import Integer, func, select
@@ -60,6 +61,37 @@ def _distractors(pool: Sequence[VocabItem], vocab: VocabItem, count: int = 2) ->
     return result[:count]
 
 
+def _term_variant_pattern(term: str) -> re.Pattern[str]:
+    words = [re.escape(word) for word in re.findall(r"[A-Za-z0-9]+", term)]
+    if not words:
+        return re.compile(re.escape(term), flags=re.IGNORECASE)
+    separator = r"[\s\-/]+"
+    return re.compile(r"\b" + separator.join(words) + r"\b", flags=re.IGNORECASE)
+
+
+def _contains_term_variant(text: str, term: str) -> bool:
+    return bool(_term_variant_pattern(term).search(text))
+
+
+def _redact_term_variants(text: str, vocab: VocabItem) -> str:
+    redacted = text
+    variants = [vocab.term, *[alias.alias for alias in getattr(vocab, "aliases", [])]]
+    for variant in sorted(set(variants), key=len, reverse=True):
+        if variant:
+            redacted = _term_variant_pattern(variant).sub("_____", redacted)
+    return redacted
+
+
+def _fill_blank_text(vocab: VocabItem) -> str:
+    redacted_example = _redact_term_variants(vocab.example, vocab)
+    if "_____" in redacted_example:
+        return f"Fill in the blank: {redacted_example}"
+    return (
+        "Fill in the blank: The term _____ is best described as: "
+        f"{vocab.english_definition}"
+    )
+
+
 def _build_question(
     *,
     quiz_id: int,
@@ -76,7 +108,7 @@ def _build_question(
         text = f'Which option best describes "{vocab.term}"?'
     elif question_type == "fill_blank":
         options, answer = _options_for_vocab(rng, vocab, distractors, use_terms=True)
-        text = f"Fill in the blank: {vocab.example.replace(vocab.term, '_____')}"
+        text = _fill_blank_text(vocab)
     elif question_type == "match_definition":
         options, answer = _options_for_vocab(rng, vocab, distractors, use_terms=True)
         text = f"Match the term to this definition: {vocab.english_definition}"

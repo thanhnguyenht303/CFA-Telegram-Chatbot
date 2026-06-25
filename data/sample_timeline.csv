@@ -1,0 +1,6 @@
+week_number,start_date,end_date,main_topic,subtopics,learning_objectives,curriculum_year,exam_window,exam_date,official_topic_weight,los_ids,reading_or_module_name,exam_phase
+1,2026-06-22,2026-06-28,Financial Statement Analysis,"income statement, accrual accounting, cash flow, ratios","Recognize core FSA terms and common exam traps",2026,February 2027,2027-02-20,13,"FSA-1,FSA-2",Income Statement and Cash Flow Basics,learning
+2,2026-06-29,2026-07-05,Quantitative Methods,"time value of money, statistics, probability","Recognize TVM and statistics vocabulary",2026,February 2027,2027-02-20,8,"QM-1,QM-2",Quantitative Methods Foundations,learning
+3,2026-07-06,2026-07-12,Fixed Income,"bond features, yield measures, duration","Recognize bond pricing and interest-rate-risk vocabulary",2026,February 2027,2027-02-20,11,"FI-1,FI-2",Fixed Income Foundations,learning
+4,2026-07-13,2026-07-19,Ethics,"standards, duties, misrepresentation","Recognize Ethics command words and common phrase traps",2026,February 2027,2027-02-20,18,"ETH-1,ETH-2",Ethical and Professional Standards,learning
+

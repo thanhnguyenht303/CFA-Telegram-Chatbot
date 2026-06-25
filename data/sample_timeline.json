@@ -1,0 +1,35 @@
+{
+  "study_plan": [
+    {
+      "week_number": 1,
+      "start_date": "2026-06-22",
+      "end_date": "2026-06-28",
+      "main_topic": "Financial Statement Analysis",
+      "subtopics": ["income statement", "accrual accounting", "cash flow", "ratios"],
+      "learning_objectives": ["Recognize core FSA terms and common exam traps"],
+      "curriculum_year": 2026,
+      "exam_window": "February 2027",
+      "exam_date": "2027-02-20",
+      "official_topic_weight": 13,
+      "los_ids": ["FSA-1", "FSA-2"],
+      "reading_or_module_name": "Income Statement and Cash Flow Basics",
+      "exam_phase": "learning"
+    },
+    {
+      "week_number": 2,
+      "start_date": "2026-06-29",
+      "end_date": "2026-07-05",
+      "main_topic": "Quantitative Methods",
+      "subtopics": ["time value of money", "statistics", "probability"],
+      "learning_objectives": ["Recognize TVM and statistics vocabulary"],
+      "curriculum_year": 2026,
+      "exam_window": "February 2027",
+      "exam_date": "2027-02-20",
+      "official_topic_weight": 8,
+      "los_ids": ["QM-1", "QM-2"],
+      "reading_or_module_name": "Quantitative Methods Foundations",
+      "exam_phase": "learning"
+    }
+  ]
+}
+

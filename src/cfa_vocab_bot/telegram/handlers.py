@@ -19,6 +19,7 @@ from telegram.ext import (
 
 from cfa_vocab_bot.config import Settings
 from cfa_vocab_bot.models import QuizQuestion, QuizResult, User, VocabItem, utc_now
+from cfa_vocab_bot.scheduler import remove_user_jobs, schedule_user_jobs
 from cfa_vocab_bot.services.content_engine import (
     record_vocab_delivery,
     select_daily_vocab,
@@ -86,6 +87,19 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return context.application.bot_data["settings"]
 
 
+def _sync_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE, user: User) -> None:
+    scheduler = context.application.bot_data.get("scheduler")
+    if scheduler is None:
+        return
+    schedule_user_jobs(scheduler, _session_factory(context), context.application.bot, user)
+
+
+def _remove_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    scheduler = context.application.bot_data.get("scheduler")
+    if scheduler is not None:
+        remove_user_jobs(scheduler, user_id)
+
+
 def _chat_id(update: Update) -> int:
     if update.effective_chat is None:
         raise RuntimeError("Update has no chat.")
@@ -106,8 +120,9 @@ def _ensure_user_from_update(session: Session, update: Update, settings: Setting
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with _session_factory(context)() as session:
-        _ensure_user_from_update(session, update, _settings(context))
+        user = _ensure_user_from_update(session, update, _settings(context))
         session.commit()
+        _sync_scheduled_jobs(context, user)
     await update.effective_message.reply_text(
         "Welcome to CFA Vocab Bot. I will help you learn CFA Level I vocabulary "
         "based on your weekly study plan. Default schedule: 07:30 daily vocab, "
@@ -220,6 +235,7 @@ async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = _ensure_user_from_update(session, update, _settings(context))
         user.paused = True
         session.commit()
+        _sync_scheduled_jobs(context, user)
     await update.effective_message.reply_text("Scheduled messages are paused. Use /resume to turn them back on.")
 
 
@@ -228,6 +244,7 @@ async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = _ensure_user_from_update(session, update, _settings(context))
         user.paused = False
         session.commit()
+        _sync_scheduled_jobs(context, user)
     await update.effective_message.reply_text("Scheduled messages are active again.")
 
 
@@ -277,6 +294,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 value = _parse_setting_value(raw_value)
             setattr(user.settings, field, value)
             session.commit()
+            _sync_scheduled_jobs(context, user)
             await update.effective_message.reply_text(f"Updated {field} to {raw_value}.")
             return
         text = (
@@ -376,8 +394,10 @@ async def delete_my_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     with _session_factory(context)() as session:
         user = get_user_by_chat_id(session, _chat_id(update))
         if user:
+            user_id = user.id
             delete_user_data(session, user)
             session.commit()
+            _remove_scheduled_jobs(context, user_id)
     await update.effective_message.reply_text("Your CFA Vocab Bot data has been deleted.")
 
 

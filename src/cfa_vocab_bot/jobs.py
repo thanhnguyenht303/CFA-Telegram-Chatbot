@@ -12,7 +12,7 @@ from cfa_vocab_bot.services.content_engine import (
     terms_due_for_mini_review,
     weak_vocab,
 )
-from cfa_vocab_bot.services.scheduling import can_send_now
+from cfa_vocab_bot.services.scheduling import can_send_now, local_date
 from cfa_vocab_bot.services.progress import progress_snapshot
 from cfa_vocab_bot.services.quiz import create_weekly_quiz, next_unanswered_question
 from cfa_vocab_bot.telegram.formatters import (
@@ -51,10 +51,15 @@ async def _log_job(
 async def send_daily_vocab_job(user_id: int, session_factory: sessionmaker[Session], telegram_bot) -> None:
     with session_factory() as session:
         user = _get_user(session, user_id)
-        if user is None or user.paused or not can_send_now(user.settings, utc_now()):
+        now = utc_now()
+        if user is None or user.paused or not can_send_now(user.settings, now):
             return
         try:
-            plan, vocab_items = select_daily_vocab(session, user)
+            plan, vocab_items = select_daily_vocab(
+                session,
+                user,
+                today=local_date(user.settings, now),
+            )
             if not vocab_items:
                 await telegram_bot.send_message(user.chat_id, "No approved vocab is available today.")
                 await _log_job(session, user.id, "daily_vocab", "skipped")
@@ -73,6 +78,7 @@ async def send_daily_vocab_job(user_id: int, session_factory: sessionmaker[Sessi
                     delivery_type="daily_vocab",
                     plan=plan,
                     message_id=getattr(sent, "message_id", None),
+                    sent_at=now,
                 )
                 await _log_job(session, user.id, "daily_vocab", "sent")
             session.commit()
@@ -86,10 +92,11 @@ async def send_daily_vocab_job(user_id: int, session_factory: sessionmaker[Sessi
 async def send_mini_review_job(user_id: int, session_factory: sessionmaker[Session], telegram_bot) -> None:
     with session_factory() as session:
         user = _get_user(session, user_id)
-        if user is None or user.paused or not can_send_now(user.settings, utc_now()):
+        now = utc_now()
+        if user is None or user.paused or not can_send_now(user.settings, now):
             return
         try:
-            vocab_items = terms_due_for_mini_review(session, user)
+            vocab_items = terms_due_for_mini_review(session, user, now=now)
             if vocab_items:
                 await telegram_bot.send_message(
                     chat_id=user.chat_id,
@@ -101,8 +108,9 @@ async def send_mini_review_job(user_id: int, session_factory: sessionmaker[Sessi
                     user=user,
                     vocab_items=vocab_items,
                     delivery_type="mini_review",
+                    sent_at=now,
                 )
-            await _log_job(session, user.id, "mini_review", "sent")
+            await _log_job(session, user.id, "mini_review", "sent" if vocab_items else "skipped")
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -114,10 +122,11 @@ async def send_mini_review_job(user_id: int, session_factory: sessionmaker[Sessi
 async def send_weekly_quiz_job(user_id: int, session_factory: sessionmaker[Session], telegram_bot) -> None:
     with session_factory() as session:
         user = _get_user(session, user_id)
-        if user is None or user.paused or not can_send_now(user.settings, utc_now()):
+        now = utc_now()
+        if user is None or user.paused or not can_send_now(user.settings, now):
             return
         try:
-            quiz = create_weekly_quiz(session, user)
+            quiz = create_weekly_quiz(session, user, today=local_date(user.settings, now))
             question = next_unanswered_question(session, user, quiz)
             if question:
                 await telegram_bot.send_message(
@@ -137,10 +146,11 @@ async def send_weekly_quiz_job(user_id: int, session_factory: sessionmaker[Sessi
 async def send_weekly_recap_job(user_id: int, session_factory: sessionmaker[Session], telegram_bot) -> None:
     with session_factory() as session:
         user = _get_user(session, user_id)
-        if user is None or user.paused or not can_send_now(user.settings, utc_now()):
+        now = utc_now()
+        if user is None or user.paused or not can_send_now(user.settings, now):
             return
         try:
-            snapshot = progress_snapshot(session, user)
+            snapshot = progress_snapshot(session, user, today=local_date(user.settings, now))
             weak = weak_vocab(session, user, limit=10)
             await telegram_bot.send_message(
                 chat_id=user.chat_id,

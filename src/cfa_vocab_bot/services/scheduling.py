@@ -6,6 +6,10 @@ from zoneinfo import ZoneInfo
 from cfa_vocab_bot.models import UserSettings
 
 
+def local_date(settings: UserSettings, now: dt.datetime) -> dt.date:
+    return now.astimezone(ZoneInfo(settings.timezone)).date()
+
+
 def can_send_now(settings: UserSettings, now: dt.datetime) -> bool:
     if settings.quiet_hours_start is None or settings.quiet_hours_end is None:
         return True
@@ -31,4 +35,3 @@ def exam_phase_for_date(exam_date: dt.date | None, today: dt.date | None = None)
     if days <= 120:
         return "consolidation"
     return "learning"
-

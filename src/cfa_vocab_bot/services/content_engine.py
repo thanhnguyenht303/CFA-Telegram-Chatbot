@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Sequence
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import Session
@@ -13,18 +14,26 @@ from cfa_vocab_bot.services.spaced_repetition import mark_seen
 APPROVED_QA_STATUSES = {"approved", "auto_approved"}
 
 
-def _date_bounds(day: dt.date) -> tuple[dt.datetime, dt.datetime]:
-    start = dt.datetime.combine(day, dt.time.min, tzinfo=dt.UTC)
-    end = dt.datetime.combine(day, dt.time.max, tzinfo=dt.UTC)
+def _user_local_date(user: User, now: dt.datetime | None = None) -> dt.date:
+    now = now or utc_now()
+    return now.astimezone(ZoneInfo(user.settings.timezone)).date()
+
+
+def _date_bounds(day: dt.date, timezone: str) -> tuple[dt.datetime, dt.datetime]:
+    local_tz = ZoneInfo(timezone)
+    start = dt.datetime.combine(day, dt.time.min, tzinfo=local_tz).astimezone(dt.UTC)
+    end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time.min, tzinfo=local_tz).astimezone(
+        dt.UTC
+    )
     return start, end
 
 
 def current_plan(session: Session, user: User, today: dt.date | None = None) -> StudyPlan | None:
-    return plan_for_date(session, user.id, today or dt.date.today())
+    return plan_for_date(session, user.id, today or _user_local_date(user))
 
 
 def next_plan(session: Session, user: User, today: dt.date | None = None) -> StudyPlan | None:
-    return next_plan_after(session, user.id, today or dt.date.today())
+    return next_plan_after(session, user.id, today or _user_local_date(user))
 
 
 def _approved_vocab_query():
@@ -53,7 +62,7 @@ def select_daily_vocab(
     today: dt.date | None = None,
     count: int | None = None,
 ) -> tuple[StudyPlan | None, list[VocabItem]]:
-    today = today or dt.date.today()
+    today = today or _user_local_date(user)
     plan = current_plan(session, user, today)
     count = count or user.settings.daily_vocab_count
     sent = _already_sent_daily_subquery(user.id)
@@ -95,7 +104,7 @@ def record_vocab_delivery(
     sent_at: dt.datetime | None = None,
 ) -> None:
     sent_at = sent_at or utc_now()
-    day_index = sent_at.weekday()
+    day_index = sent_at.astimezone(ZoneInfo(user.settings.timezone)).weekday()
     for vocab in vocab_items:
         session.add(
             DeliveryLog(
@@ -117,8 +126,8 @@ def record_vocab_delivery(
 
 
 def todays_vocab(session: Session, user: User, today: dt.date | None = None) -> list[VocabItem]:
-    today = today or dt.date.today()
-    start, end = _date_bounds(today)
+    today = today or _user_local_date(user)
+    start, end = _date_bounds(today, user.settings.timezone)
     return list(
         session.scalars(
             select(VocabItem)
@@ -127,7 +136,7 @@ def todays_vocab(session: Session, user: User, today: dt.date | None = None) -> 
                 DeliveryLog.user_id == user.id,
                 DeliveryLog.delivery_type == "daily_vocab",
                 DeliveryLog.sent_at >= start,
-                DeliveryLog.sent_at <= end,
+                DeliveryLog.sent_at < end,
             )
             .order_by(DeliveryLog.id.asc())
         )
@@ -159,7 +168,10 @@ def select_review_vocab(
         return due
 
     seen_ids = {item.id for item in due}
-    today_items = [item for item in todays_vocab(session, user, now.date()) if item.id not in seen_ids]
+    local_today = _user_local_date(user, now)
+    today_items = [
+        item for item in todays_vocab(session, user, local_today) if item.id not in seen_ids
+    ]
     return due + today_items[: count - len(due)]
 
 
@@ -178,8 +190,8 @@ def weak_vocab(session: Session, user: User, *, limit: int = 10) -> list[tuple[V
 
 
 def weekly_vocab(session: Session, user: User, plan: StudyPlan) -> list[VocabItem]:
-    start = dt.datetime.combine(plan.start_date, dt.time.min, tzinfo=dt.UTC)
-    end = dt.datetime.combine(plan.end_date, dt.time.max, tzinfo=dt.UTC)
+    start, _ = _date_bounds(plan.start_date, user.settings.timezone)
+    _, end = _date_bounds(plan.end_date, user.settings.timezone)
     return list(
         session.scalars(
             select(VocabItem)
@@ -188,7 +200,7 @@ def weekly_vocab(session: Session, user: User, plan: StudyPlan) -> list[VocabIte
                 DeliveryLog.user_id == user.id,
                 DeliveryLog.delivery_type == "daily_vocab",
                 DeliveryLog.sent_at >= start,
-                DeliveryLog.sent_at <= end,
+                DeliveryLog.sent_at < end,
             )
             .order_by(DeliveryLog.sent_at.asc(), DeliveryLog.id.asc())
         )
@@ -225,5 +237,10 @@ def review_debt(session: Session, user: User, now: dt.datetime | None = None) ->
     )
 
 
-def terms_due_for_mini_review(session: Session, user: User) -> list[VocabItem]:
-    return select_review_vocab(session, user, count=3)
+def terms_due_for_mini_review(
+    session: Session,
+    user: User,
+    *,
+    now: dt.datetime | None = None,
+) -> list[VocabItem]:
+    return select_review_vocab(session, user, now=now, count=3)

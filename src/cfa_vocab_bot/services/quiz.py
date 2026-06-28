@@ -176,7 +176,7 @@ def create_weekly_quiz(
     today: dt.date | None = None,
     question_count: int = 20,
 ) -> QuizResult:
-    plan = current_plan(session, user, today or dt.date.today())
+    plan = current_plan(session, user, today)
     vocab = weekly_vocab(session, user, plan) if plan else []
     unique: list[VocabItem] = []
     seen_ids: set[int] = set()

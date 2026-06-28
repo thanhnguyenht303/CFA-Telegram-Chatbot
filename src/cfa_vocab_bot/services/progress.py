@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import Integer, distinct, func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.orm import Session
 
 from cfa_vocab_bot.models import DeliveryLog, QuizResult, ReviewState, User, VocabItem, utc_now
@@ -10,14 +11,21 @@ from cfa_vocab_bot.schemas import ProgressSnapshot
 from cfa_vocab_bot.services.content_engine import current_plan, next_plan, review_debt
 
 
+def _as_utc(value: dt.datetime) -> dt.datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.UTC)
+    return value.astimezone(dt.UTC)
+
+
 def _streak_days(session: Session, user: User, today: dt.date | None = None) -> int:
-    today = today or dt.date.today()
+    timezone = ZoneInfo(user.settings.timezone)
+    today = today or utc_now().astimezone(timezone).date()
     rows = session.scalars(
-        select(distinct(func.date(DeliveryLog.sent_at)))
+        select(DeliveryLog.sent_at)
         .where(DeliveryLog.user_id == user.id, DeliveryLog.delivery_type == "daily_vocab")
-        .order_by(func.date(DeliveryLog.sent_at).desc())
+        .order_by(DeliveryLog.sent_at.desc())
     ).all()
-    sent_dates = {dt.date.fromisoformat(str(value)) for value in rows}
+    sent_dates = {_as_utc(value).astimezone(timezone).date() for value in rows}
     streak = 0
     cursor = today
     while cursor in sent_dates:
@@ -55,7 +63,7 @@ def weighted_readiness(session: Session, user: User) -> dict[str, float]:
 
 
 def progress_snapshot(session: Session, user: User, today: dt.date | None = None) -> ProgressSnapshot:
-    today = today or dt.date.today()
+    today = today or utc_now().astimezone(ZoneInfo(user.settings.timezone)).date()
     totals = session.execute(
         select(
             func.count(ReviewState.id),

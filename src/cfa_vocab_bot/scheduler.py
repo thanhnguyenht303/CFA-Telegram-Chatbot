@@ -16,6 +16,8 @@ from cfa_vocab_bot.jobs import (
 )
 from cfa_vocab_bot.models import User
 
+ALERT_JOB_TYPES = ("daily_vocab", "mini_review", "weekly_quiz", "weekly_recap")
+
 
 def _cron_for_time(*, timezone: str, at: dt.time, day_of_week: str | int | None = None) -> CronTrigger:
     kwargs = {
@@ -28,6 +30,17 @@ def _cron_for_time(*, timezone: str, at: dt.time, day_of_week: str | int | None 
     return CronTrigger(**kwargs)
 
 
+def _user_job_id(user_id: int, job_type: str) -> str:
+    return f"user:{user_id}:{job_type}"
+
+
+def remove_user_jobs(scheduler: AsyncIOScheduler, user_id: int) -> None:
+    for job_type in ALERT_JOB_TYPES:
+        job_id = _user_job_id(user_id, job_type)
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+
+
 def schedule_user_jobs(
     scheduler: AsyncIOScheduler,
     session_factory: sessionmaker[Session],
@@ -36,11 +49,13 @@ def schedule_user_jobs(
 ) -> None:
     settings = user.settings
     if not user.is_active or user.paused:
+        remove_user_jobs(scheduler, user.id)
         return
+    remove_user_jobs(scheduler, user.id)
     scheduler.add_job(
         send_daily_vocab_job,
         _cron_for_time(timezone=settings.timezone, at=settings.daily_send_time, day_of_week="mon-fri"),
-        id=f"user:{user.id}:daily_vocab",
+        id=_user_job_id(user.id, "daily_vocab"),
         replace_existing=True,
         kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
         max_instances=1,
@@ -49,7 +64,7 @@ def schedule_user_jobs(
     scheduler.add_job(
         send_mini_review_job,
         _cron_for_time(timezone=settings.timezone, at=settings.mini_review_time, day_of_week="mon-fri"),
-        id=f"user:{user.id}:mini_review",
+        id=_user_job_id(user.id, "mini_review"),
         replace_existing=True,
         kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
         max_instances=1,
@@ -62,7 +77,7 @@ def schedule_user_jobs(
             at=settings.weekly_quiz_time,
             day_of_week=settings.weekly_quiz_day,
         ),
-        id=f"user:{user.id}:weekly_quiz",
+        id=_user_job_id(user.id, "weekly_quiz"),
         replace_existing=True,
         kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
         max_instances=1,
@@ -75,7 +90,7 @@ def schedule_user_jobs(
             at=settings.weekly_recap_time,
             day_of_week=settings.weekly_recap_day,
         ),
-        id=f"user:{user.id}:weekly_recap",
+        id=_user_job_id(user.id, "weekly_recap"),
         replace_existing=True,
         kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
         max_instances=1,

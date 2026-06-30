@@ -29,6 +29,12 @@ from cfa_vocab_bot.services.content_engine import (
 )
 from cfa_vocab_bot.services.export import export_all_user_data, export_anki_tsv, export_vocab_csv
 from cfa_vocab_bot.services.importers import import_timeline
+from cfa_vocab_bot.services.learning_settings import (
+    append_topic_to_study_plan,
+    list_user_study_plan,
+    reset_user_study_plan,
+    skip_current_topic_remainder,
+)
 from cfa_vocab_bot.services.privacy import delete_user_data
 from cfa_vocab_bot.services.progress import format_progress, progress_snapshot
 from cfa_vocab_bot.services.quiz import (
@@ -47,14 +53,24 @@ from cfa_vocab_bot.services.research import (
     research_topic,
 )
 from cfa_vocab_bot.services.spaced_repetition import apply_review_result, get_or_create_review_state
-from cfa_vocab_bot.services.topics import available_topic_counts
+from cfa_vocab_bot.services.subtopics import (
+    add_current_subtopic,
+    clear_current_subtopics,
+    list_current_subtopics,
+)
+from cfa_vocab_bot.services.topics import available_topic_counts, resolve_topic_for_learning
 from cfa_vocab_bot.services.users import ensure_user, get_user_by_chat_id
 from cfa_vocab_bot.telegram.formatters import (
+    format_appended_study_plan,
     format_available_topics,
+    format_current_subtopics,
     format_daily_vocab,
     format_mini_review,
     format_quiz_question,
     format_research_suggestions,
+    format_start_welcome,
+    format_study_plan,
+    format_topic_validation_error,
 )
 from cfa_vocab_bot.telegram.keyboards import quiz_keyboard, research_keyboard, vocab_keyboard
 
@@ -67,7 +83,13 @@ COMMANDS = [
     BotCommand("weak", "Show weak words"),
     BotCommand("topic", "Show current CFA topic"),
     BotCommand("topics_display", "Show vocab topics in the pool"),
+    BotCommand("learning_setting", "Set weeks needed for a topic"),
+    BotCommand("subtopic_add", "Add current week sub-topic"),
+    BotCommand("subtopic_list", "List current week sub-topics"),
+    BotCommand("subtopic_clear", "Clear current week sub-topics"),
     BotCommand("nextweek", "Preview next topic"),
+    BotCommand("reset", "Clear your study plan"),
+    BotCommand("skip", "Skip remaining future weeks of current topic"),
     BotCommand("pause", "Pause scheduled messages"),
     BotCommand("resume", "Resume scheduled messages"),
     BotCommand("settings", "Change schedule and preferences"),
@@ -121,13 +143,10 @@ def _ensure_user_from_update(session: Session, update: Update, settings: Setting
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with _session_factory(context)() as session:
         user = _ensure_user_from_update(session, update, _settings(context))
+        welcome = format_start_welcome(user)
         session.commit()
         _sync_scheduled_jobs(context, user)
-    await update.effective_message.reply_text(
-        "Welcome to CFA Vocab Bot. I will help you learn CFA Level I vocabulary "
-        "based on your weekly study plan. Default schedule: 07:30 daily vocab, "
-        "Saturday 09:00 quiz, Sunday 18:30 recap. Upload a CSV or JSON timeline to begin."
-    )
+    await update.effective_message.reply_text(welcome)
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -202,7 +221,7 @@ async def topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Current topic: Week {plan.week_number} - {plan.main_topic}\n"
             f"Subtopics: {', '.join(plan.subtopics) if plan.subtopics else 'n/a'}"
             if plan
-            else "No current topic. Upload a timeline CSV or JSON."
+            else "No current topic. Upload a timeline CSV/JSON or use /learning-setting <topic> <weeks>."
         )
         await update.effective_message.reply_text(text)
 
@@ -213,6 +232,191 @@ async def topics_display(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = format_available_topics(available_topic_counts(session))
         session.commit()
         await update.effective_message.reply_text(text)
+
+
+def _args_from_command_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    if context.args:
+        return list(context.args)
+    text = update.effective_message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) == 1:
+        return []
+    return parts[1].split()
+
+
+def _parse_learning_setting_args(args: list[str]) -> tuple[str, int] | None:
+    if not args:
+        return None
+    if len(args) < 2:
+        raise ValueError(
+            "Use /learning-setting <topic> <weeks>, for example: "
+            "/learning-setting Fixed Income 3"
+        )
+    try:
+        weeks = int(args[-1])
+    except ValueError as exc:
+        raise ValueError("The last argument must be the number of weeks.") from exc
+    topic = " ".join(args[:-1]).strip()
+    if not topic:
+        raise ValueError("Topic cannot be empty.")
+    return topic, weeks
+
+
+def _parse_subtopic_args(args: list[str]) -> str:
+    subtopic = " ".join(args).strip()
+    if not subtopic:
+        raise ValueError(
+            "Use /subtopic-add <subtopic>, for example: /subtopic-add Time Value of Money"
+        )
+    return subtopic
+
+
+async def learning_setting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        parsed = _parse_learning_setting_args(_args_from_command_text(update, context))
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        if parsed is None:
+            text = format_study_plan(list_user_study_plan(session, user=user))
+            session.commit()
+            await update.effective_message.reply_text(text)
+            return
+        topic_name, weeks = parsed
+        resolution = resolve_topic_for_learning(session, topic_name)
+        if not resolution.is_valid:
+            await update.effective_message.reply_text(
+                format_topic_validation_error(
+                    topic=topic_name,
+                    weeks=weeks,
+                    suggestion=resolution.suggestion,
+                    available_topics=resolution.available_topics,
+                )
+            )
+            return
+        try:
+            plans = append_topic_to_study_plan(
+                session,
+                user=user,
+                topic=resolution.topic or topic_name,
+                weeks=weeks,
+                today=dt.datetime.now(ZoneInfo(user.settings.timezone)).date(),
+            )
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        session.commit()
+    await update.effective_message.reply_text(
+        format_appended_study_plan(resolution.topic or topic_name, plans)
+    )
+
+
+async def subtopic_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        subtopic_text = _parse_subtopic_args(_args_from_command_text(update, context))
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        today = dt.datetime.now(ZoneInfo(user.settings.timezone)).date()
+        try:
+            plan, added, clean_subtopic = add_current_subtopic(
+                session,
+                user=user,
+                subtopic=subtopic_text,
+                today=today,
+            )
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        session.commit()
+    if added:
+        await update.effective_message.reply_text(
+            f"Added sub-topic '{clean_subtopic}' to Week {plan.week_number}: {plan.main_topic}."
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"'{clean_subtopic}' is already a sub-topic for Week {plan.week_number}: {plan.main_topic}."
+        )
+
+
+async def subtopic_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        today = dt.datetime.now(ZoneInfo(user.settings.timezone)).date()
+        try:
+            plan = list_current_subtopics(session, user=user, today=today)
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        text = format_current_subtopics(plan)
+        session.commit()
+    await update.effective_message.reply_text(text)
+
+
+async def subtopic_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        today = dt.datetime.now(ZoneInfo(user.settings.timezone)).date()
+        try:
+            plan, count = clear_current_subtopics(session, user=user, today=today)
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        session.commit()
+    word = "sub-topic" if count == 1 else "sub-topics"
+    await update.effective_message.reply_text(
+        f"Cleared {count} {word} from Week {plan.week_number}: {plan.main_topic}."
+    )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        plan_count, setting_count = reset_user_study_plan(session, user=user)
+        session.commit()
+    await update.effective_message.reply_text(
+        f"Reset study_plan. Removed {plan_count} study-plan weeks and "
+        f"{setting_count} topic learning settings.\n"
+        "Use /learning-setting <topic> <weeks> to build a new future plan."
+    )
+
+
+async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with _session_factory(context)() as session:
+        user = _ensure_user_from_update(session, update, _settings(context))
+        today = dt.datetime.now(ZoneInfo(user.settings.timezone)).date()
+        try:
+            current, removed_count, next_plan = skip_current_topic_remainder(
+                session,
+                user=user,
+                today=today,
+            )
+        except ValueError as exc:
+            await update.effective_message.reply_text(str(exc))
+            return
+        session.commit()
+    if removed_count == 0:
+        await update.effective_message.reply_text(
+            f"No future {current.main_topic} weeks were found to skip. "
+            "Your next study-plan stage is already next."
+        )
+        return
+    if next_plan:
+        await update.effective_message.reply_text(
+            f"Skipped {removed_count} future {current.main_topic} week(s). "
+            f"Next week is now Week {next_plan.week_number}: {next_plan.main_topic}."
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"Skipped {removed_count} future {current.main_topic} week(s). "
+            "No future topic remains; use /learning-setting to extend the study_plan."
+        )
 
 
 async def nextweek(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -323,24 +527,34 @@ async def export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     temp_path.unlink(missing_ok=True)
 
 
-def _parse_research_args(args: list[str]) -> tuple[str, int]:
+def _parse_research_args(args: list[str]) -> tuple[str, str | None, int]:
     if len(args) < 2:
-        raise ValueError("Use /research <topic> <number>, for example /research Fixed Income 10")
+        raise ValueError(
+            "Use /research <topic> <number>, for example /research Fixed Income 10. "
+            "For sub-topics, use /research Quantitative Methods - Hypothesis Testing 10"
+        )
     try:
         number = int(args[-1])
     except ValueError as exc:
         raise ValueError("The last argument must be a number.") from exc
     if number < 1:
         raise ValueError("Number must be at least 1.")
-    topic = " ".join(args[:-1]).strip()
+    topic_parts = args[:-1]
+    subtopic = None
+    if "-" in topic_parts:
+        separator_index = topic_parts.index("-")
+        topic = " ".join(topic_parts[:separator_index]).strip()
+        subtopic = " ".join(topic_parts[separator_index + 1 :]).strip() or None
+    else:
+        topic = " ".join(topic_parts).strip()
     if not topic:
         raise ValueError("Topic cannot be empty.")
-    return topic, min(number, MAX_RESEARCH_NUMBER)
+    return topic, subtopic, min(number, MAX_RESEARCH_NUMBER)
 
 
 async def research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        topic_text, number = _parse_research_args(context.args or [])
+        topic_text, subtopic_text, number = _parse_research_args(context.args or [])
     except ValueError as exc:
         await update.effective_message.reply_text(str(exc))
         return
@@ -353,16 +567,36 @@ async def research(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    status_message = await update.effective_message.reply_text(
-        f"Researching CFA Level I terms for '{topic_text}'..."
-    )
     with _session_factory(context)() as session:
         user = _ensure_user_from_update(session, update, settings)
+        resolution = resolve_topic_for_learning(session, topic_text)
+        if not resolution.is_valid:
+            if resolution.suggestion and subtopic_text:
+                text = (
+                    f"Topic not found: {topic_text}\n"
+                    f"Did you mean: {resolution.suggestion}?\n"
+                    f"Run /research {resolution.suggestion} - {subtopic_text} {number} to confirm."
+                )
+            else:
+                text = format_topic_validation_error(
+                    topic=topic_text,
+                    weeks=number,
+                    suggestion=resolution.suggestion,
+                    available_topics=resolution.available_topics,
+                ).replace("/learning-setting", "/research")
+            await update.effective_message.reply_text(text)
+            return
+        topic_text = resolution.topic or topic_text
+        focus_text = f"{topic_text} - {subtopic_text}" if subtopic_text else topic_text
+        status_message = await update.effective_message.reply_text(
+            f"Researching CFA Level I terms for '{focus_text}'..."
+        )
         try:
             suggestions = await research_topic(
                 session,
                 user=user,
                 topic=topic_text,
+                subtopic=subtopic_text,
                 number=number,
                 provider=provider_from_settings(settings),
                 model_name=settings.openai_research_model,
@@ -553,7 +787,25 @@ def register_handlers(application: Application) -> None:
     application.add_handler(
         MessageHandler(filters.Regex(r"^/topics-display(@\w+)?(?:\s|$)"), topics_display)
     )
+    application.add_handler(CommandHandler("learning_setting", learning_setting))
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^/learning-setting(@\w+)?(?:\s|$)"), learning_setting)
+    )
+    application.add_handler(CommandHandler("subtopic_add", subtopic_add))
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^/subtopic-add(@\w+)?(?:\s|$)"), subtopic_add)
+    )
+    application.add_handler(CommandHandler("subtopic_list", subtopic_list))
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^/subtopic-list(@\w+)?(?:\s|$)"), subtopic_list)
+    )
+    application.add_handler(CommandHandler("subtopic_clear", subtopic_clear))
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^/subtopic-clear(@\w+)?(?:\s|$)"), subtopic_clear)
+    )
     application.add_handler(CommandHandler("nextweek", nextweek))
+    application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("skip", skip))
     application.add_handler(CommandHandler("pause", pause))
     application.add_handler(CommandHandler("resume", resume))
     application.add_handler(CommandHandler("settings", settings))

@@ -37,7 +37,12 @@ class ResearchUnavailable(RuntimeError):
 
 class ResearchProvider(Protocol):
     async def research(
-        self, *, topic: str, number: int, exclude_terms: Sequence[str] = ()
+        self,
+        *,
+        topic: str,
+        number: int,
+        exclude_terms: Sequence[str] = (),
+        subtopic: str | None = None,
     ) -> list[ResearchCandidate]:
         ...
 
@@ -125,7 +130,12 @@ class OpenAIWebResearchProvider:
         self.timeout_seconds = timeout_seconds
 
     async def research(
-        self, *, topic: str, number: int, exclude_terms: Sequence[str] = ()
+        self,
+        *,
+        topic: str,
+        number: int,
+        exclude_terms: Sequence[str] = (),
+        subtopic: str | None = None,
     ) -> list[ResearchCandidate]:
         if not self.api_key:
             raise ResearchUnavailable("OPENAI_API_KEY is not configured.")
@@ -148,8 +158,10 @@ class OpenAIWebResearchProvider:
             "examples, exam traps, and source tracking. Avoid terms that are too generic unless they "
             "have a specific CFA Level I exam meaning."
         )
+        subtopic_focus = f"Focus specifically on sub-topic: {subtopic}.\n" if subtopic else ""
         input_text = (
             f"Research CFA Level I vocabulary for topic: {topic}.\n"
+            f"{subtopic_focus}"
             f"Return the top {requested} candidate terms or phrases. Rank by topic relevance, "
             "exam usefulness, difficulty/trap value, and practical value when reading English CFA "
             "question stems. Return only terms that are not already in the user's pool."
@@ -284,9 +296,15 @@ def store_research_candidates(
     candidates: Sequence[ResearchCandidate],
     model_name: str | None = None,
     exclude_normalized_terms: Iterable[str] = (),
+    subtopic: str | None = None,
 ) -> list[ResearchSuggestion]:
     suggestions: list[ResearchSuggestion] = []
-    raw_output = {"topic": topic, "requested_number": requested_number, "candidates": []}
+    raw_output = {
+        "topic": topic,
+        "subtopic": subtopic,
+        "requested_number": requested_number,
+        "candidates": [],
+    }
     seen_normalized = set(exclude_normalized_terms)
 
     for candidate in candidates:
@@ -307,7 +325,7 @@ def store_research_candidates(
         suggestion = ResearchSuggestion(
             user_id=user.id,
             topic=candidate_topic,
-            subtopic=candidate.subtopic,
+            subtopic=candidate.subtopic or subtopic,
             term=candidate.term,
             normalized_term=normalized,
             aliases=candidate.aliases,
@@ -331,7 +349,10 @@ def store_research_candidates(
         ContentGenerationLog(
             prompt_version="research_v1",
             model_name=model_name,
-            source_context=f"OpenAI web research topic={topic}",
+            source_context=(
+                f"OpenAI web research topic={topic}"
+                + (f"; subtopic={subtopic}" if subtopic else "")
+            ),
             generated_output=json.dumps(raw_output, ensure_ascii=False),
             qa_status="suggested",
         )
@@ -345,6 +366,7 @@ async def research_topic(
     *,
     user: User,
     topic: str,
+    subtopic: str | None = None,
     number: int,
     provider: ResearchProvider,
     model_name: str | None = None,
@@ -362,6 +384,7 @@ async def research_topic(
             topic=topic,
             number=max(remaining, safe_number),
             exclude_terms=excluded_display_terms + [suggestion.term for suggestion in suggestions],
+            subtopic=subtopic,
         )
         batch = store_research_candidates(
             session,
@@ -371,6 +394,7 @@ async def research_topic(
             candidates=candidates,
             model_name=model_name,
             exclude_normalized_terms=excluded_normalized,
+            subtopic=subtopic,
         )
         suggestions.extend(batch)
         if not batch and not candidates:

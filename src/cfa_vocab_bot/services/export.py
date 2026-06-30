@@ -13,6 +13,7 @@ from cfa_vocab_bot.models import (
     QuizResult,
     ResearchSuggestion,
     ReviewState,
+    TopicLearningSetting,
     User,
     VocabItem,
 )
@@ -93,6 +94,9 @@ def export_all_user_data(session: Session, user: User) -> str:
     research_suggestions = session.scalars(
         select(ResearchSuggestion).where(ResearchSuggestion.user_id == user.id)
     ).all()
+    learning_settings = session.scalars(
+        select(TopicLearningSetting).where(TopicLearningSetting.user_id == user.id)
+    ).all()
     payload = {
         "user": {
             "telegram_user_id": user.telegram_user_id,
@@ -162,6 +166,14 @@ def export_all_user_data(session: Session, user: User) -> str:
                 else None,
             }
             for suggestion in research_suggestions
+        ],
+        "topic_learning_settings": [
+            {
+                "topic": setting.topic,
+                "weeks": setting.weeks,
+                "updated_at": setting.updated_at.isoformat() if setting.updated_at else None,
+            }
+            for setting in learning_settings
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

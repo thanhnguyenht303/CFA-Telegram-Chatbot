@@ -53,6 +53,9 @@ class User(Base):
     review_states: Mapped[list["ReviewState"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    topic_learning_settings: Mapped[list["TopicLearningSetting"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserSettings(Base):
@@ -78,6 +81,25 @@ class UserSettings(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="settings")
+
+
+class TopicLearningSetting(Base):
+    __tablename__ = "topic_learning_settings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "normalized_topic", name="uq_topic_learning_user_topic"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_topic: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    weeks: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="topic_learning_settings")
 
 
 class StudyPlan(Base):

@@ -129,7 +129,7 @@ def plan_for_date(session: Session, user_id: int | None, today: dt.date) -> Stud
         )
         .order_by(StudyPlan.start_date.desc())
     )
-    if user_plan:
+    if user_plan or user_id is not None:
         return user_plan
     return session.scalar(
         select(StudyPlan)
@@ -148,11 +148,10 @@ def next_plan_after(session: Session, user_id: int | None, today: dt.date) -> St
         .where(StudyPlan.user_id == user_id, StudyPlan.start_date > today)
         .order_by(StudyPlan.start_date.asc())
     )
-    if user_plan:
+    if user_plan or user_id is not None:
         return user_plan
     return session.scalar(
         select(StudyPlan)
         .where(StudyPlan.user_id.is_(None), StudyPlan.start_date > today)
         .order_by(StudyPlan.start_date.asc())
     )
-

@@ -2,8 +2,55 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from cfa_vocab_bot.models import QuizQuestion, QuizResult, ResearchSuggestion, StudyPlan, VocabItem
+from cfa_vocab_bot.models import (
+    QuizQuestion,
+    QuizResult,
+    ResearchSuggestion,
+    StudyPlan,
+    TopicLearningSetting,
+    User,
+    VocabItem,
+)
 from cfa_vocab_bot.schemas import ProgressSnapshot
+
+WEEKDAY_NAMES = {
+    0: "Monday",
+    1: "Tuesday",
+    2: "Wednesday",
+    3: "Thursday",
+    4: "Friday",
+    5: "Saturday",
+    6: "Sunday",
+}
+
+
+def _format_time(value) -> str:
+    return value.strftime("%H:%M")
+
+
+def _format_weekday(day: int) -> str:
+    return WEEKDAY_NAMES.get(day, f"day {day}")
+
+
+def format_start_welcome(user: User) -> str:
+    settings = user.settings
+    paused_note = "\nScheduled messages are currently paused. Use /resume to turn them back on." if user.paused else ""
+    return (
+        "Welcome to CFA Vocab Bot. I will help you learn CFA Level I vocabulary "
+        "based on your weekly study plan.\n\n"
+        "Your current schedule:\n"
+        f"- Timezone: {settings.timezone}\n"
+        f"- Daily vocab: {settings.daily_vocab_count} terms at {_format_time(settings.daily_send_time)} "
+        "Monday-Friday\n"
+        f"- Mini review: {_format_time(settings.mini_review_time)} Monday-Friday\n"
+        f"- Weekly quiz: {_format_weekday(settings.weekly_quiz_day)} "
+        f"{_format_time(settings.weekly_quiz_time)}\n"
+        f"- Weekly recap: {_format_weekday(settings.weekly_recap_day)} "
+        f"{_format_time(settings.weekly_recap_time)}\n\n"
+        "Upload a CSV or JSON timeline, or use /learning-setting <topic> <weeks> "
+        "to build your plan. Use /settings to change your schedule."
+        f"{paused_note}"
+    )
 
 
 def format_vocab_card(index: int, vocab: VocabItem) -> str:
@@ -101,3 +148,76 @@ def format_available_topics(topic_counts: Sequence[tuple[str, int]]) -> str:
         word = "word" if count == 1 else "words"
         lines.append(f"- {topic}: {count} {word}")
     return "\n".join(lines)
+
+
+def format_topic_validation_error(
+    *,
+    topic: str,
+    weeks: int,
+    suggestion: str | None,
+    available_topics: Sequence[str],
+) -> str:
+    if suggestion:
+        return (
+            f"Topic not found: {topic}\n"
+            f"Did you mean: {suggestion}?\n"
+            f"Run /learning-setting {suggestion} {weeks} to confirm."
+        )
+    preview = "\n".join(f"- {name}" for name in available_topics[:8])
+    return (
+        f"Topic not found: {topic}\n"
+        "Use one of the available vocab topics from /topics-display."
+        + (f"\n\nAvailable topics:\n{preview}" if preview else "")
+    )
+
+
+def format_current_subtopics(plan: StudyPlan) -> str:
+    if not plan.subtopics:
+        return (
+            f"No sub-topics are set for Week {plan.week_number}: {plan.main_topic}.\n"
+            "Use /subtopic-add <subtopic>, for example: /subtopic-add Time Value of Money"
+        )
+    lines = [f"Sub-topics for Week {plan.week_number}: {plan.main_topic}"]
+    lines.extend(f"- {subtopic}" for subtopic in plan.subtopics)
+    return "\n".join(lines)
+
+
+def format_learning_settings(settings: Sequence[TopicLearningSetting]) -> str:
+    if not settings:
+        return (
+            "No topic learning settings yet.\n"
+            "Use /learning-setting <topic> <weeks>, for example: "
+            "/learning-setting Fixed Income 3"
+        )
+    lines = ["Topic learning settings"]
+    for setting in settings:
+        word = "week" if setting.weeks == 1 else "weeks"
+        lines.append(f"- {setting.topic}: {setting.weeks} {word}")
+    return "\n".join(lines)
+
+
+def format_study_plan(plans: Sequence[StudyPlan]) -> str:
+    if not plans:
+        return (
+            "Your study_plan is empty.\n"
+            "Use /learning-setting <topic> <weeks>, for example: "
+            "/learning-setting Quantitative Methods 2"
+        )
+    lines = ["Current study_plan"]
+    for plan in plans:
+        lines.append(
+            f"- Week {plan.week_number}: {plan.main_topic} "
+            f"({plan.start_date.isoformat()} to {plan.end_date.isoformat()})"
+        )
+    return "\n".join(lines)
+
+
+def format_appended_study_plan(topic: str, plans: Sequence[StudyPlan]) -> str:
+    if not plans:
+        return "No weeks were added."
+    week_word = "week" if len(plans) == 1 else "weeks"
+    return (
+        f"Added {topic} for {len(plans)} {week_word} to study_plan.\n"
+        f"Starts: Week {plans[0].week_number} ({plans[0].start_date.isoformat()})\n"
+        f"Ends: Week {plans[-1].week_number} ({plans[-1].end_date.isoformat()})"
+    )

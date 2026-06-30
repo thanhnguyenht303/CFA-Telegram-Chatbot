@@ -9,14 +9,19 @@ from cfa_vocab_bot.services.research import (
     store_research_candidates,
 )
 from cfa_vocab_bot.telegram.formatters import format_research_suggestions
+from cfa_vocab_bot.telegram.handlers import _parse_research_args
 
 
-def _candidate(term: str, topic: str = "Portfolio Management") -> ResearchCandidate:
+def _candidate(
+    term: str,
+    topic: str = "Portfolio Management",
+    subtopic: str | None = "portfolio risk",
+) -> ResearchCandidate:
     return ResearchCandidate(
         term=term,
         aliases=[],
         topic=topic,
-        subtopic="portfolio risk",
+        subtopic=subtopic,
         english_definition=f"A CFA Level I definition for {term}.",
         vietnamese_translation=f"Nghia cua {term}.",
         example=f"An analyst uses {term} when evaluating a CFA-style case.",
@@ -62,8 +67,15 @@ async def test_research_topic_retries_until_requested_count_after_duplicate_filt
         def __init__(self):
             self.calls = []
 
-        async def research(self, *, topic, number, exclude_terms=()):
-            self.calls.append({"topic": topic, "number": number, "exclude_terms": list(exclude_terms)})
+        async def research(self, *, topic, number, exclude_terms=(), subtopic=None):
+            self.calls.append(
+                {
+                    "topic": topic,
+                    "number": number,
+                    "exclude_terms": list(exclude_terms),
+                    "subtopic": subtopic,
+                }
+            )
             if len(self.calls) == 1:
                 return [
                     _candidate("Revenue recognition", "Financial Statement Analysis"),
@@ -96,6 +108,41 @@ async def test_research_topic_retries_until_requested_count_after_duplicate_filt
     assert len(provider.calls) == 2
     assert "Revenue recognition" in provider.calls[0]["exclude_terms"]
     assert "OCF" in provider.calls[0]["exclude_terms"]
+
+
+async def test_research_topic_passes_and_stores_subtopic(session, user, seeded):
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def research(self, *, topic, number, exclude_terms=(), subtopic=None):
+            self.calls.append({"topic": topic, "number": number, "subtopic": subtopic})
+            return [
+                _candidate(
+                    "Sampling error focus term",
+                    "Quantitative Methods",
+                    subtopic=None,
+                )
+            ]
+
+    provider = FakeProvider()
+
+    suggestions = await research_topic(
+        session,
+        user=user,
+        topic="Quantitative Methods",
+        subtopic="Hypothesis Testing",
+        number=1,
+        provider=provider,
+        model_name="fake-model",
+    )
+    session.commit()
+
+    assert provider.calls == [
+        {"topic": "Quantitative Methods", "number": 1, "subtopic": "Hypothesis Testing"}
+    ]
+    assert suggestions[0].topic == "Quantitative Methods"
+    assert suggestions[0].subtopic == "Hypothesis Testing"
 
 
 def test_existing_topic_terms_and_aliases_includes_aliases(session, seeded):
@@ -146,3 +193,9 @@ def test_format_research_suggestions_includes_vietnamese_meaning(session, user):
     assert "Meaning:" in message
     assert "Vietnamese: Nghia cua Tracking error." in message
     assert "Exam trap:" in message
+
+
+def test_parse_research_args_supports_subtopic_separator():
+    assert _parse_research_args(
+        ["Quantitative", "Methods", "-", "Hypothesis", "Testing", "10"]
+    ) == ("Quantitative Methods", "Hypothesis Testing", 10)

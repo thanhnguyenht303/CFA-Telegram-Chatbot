@@ -6,13 +6,14 @@ The implementation follows the attached product spec as the source of truth. Whe
 
 ## Features
 
-- Telegram commands: `/start`, `/today`, `/review`, `/quiz`, `/progress`, `/weak`, `/topic`, `/topics-display`, `/topics_display`, `/nextweek`, `/pause`, `/resume`, `/settings`, `/export`, `/research`, `/export_my_data`, `/delete_my_data`, `/error`.
+- Telegram commands: `/start`, `/today`, `/review`, `/quiz`, `/progress`, `/weak`, `/topic`, `/topics-display`, `/topics_display`, `/learning-setting`, `/learning_setting`, `/subtopic-add`, `/subtopic_add`, `/subtopic-list`, `/subtopic_list`, `/subtopic-clear`, `/subtopic_clear`, `/reset`, `/skip`, `/nextweek`, `/pause`, `/resume`, `/settings`, `/export`, `/research`, `/export_my_data`, `/delete_my_data`, `/error`.
 - `/research <topic> <number>` uses OpenAI web research to propose new CFA Level I terms, then adds only user-approved terms to the learning database.
 - Scheduled messages with per-user timezone support:
   - Monday-Friday 07:30: 5 new vocab/phrases.
   - Monday-Friday 21:40: 3 mini-review prompts.
   - Saturday 09:00: weekly quiz.
   - Sunday 18:30: weekly recap and weak words.
+  - Daily plan-extension reminder when the current study-plan row has 2 days or fewer left and no next week is planned.
 - Timeline import from CSV or JSON. Google Sheets can be supported by exporting the sheet to CSV for MVP.
 - Seed vocabulary works without any LLM integration.
 - Optional LLM interface is isolated in `services/llm.py`; failure or absence of an LLM never blocks scheduled content.
@@ -52,6 +53,7 @@ The schema includes the MVP and expanded tables from the spec:
 
 - `users`
 - `user_settings`
+- `topic_learning_settings`
 - `study_plan`
 - `vocab_items`
 - `vocab_aliases`
@@ -92,11 +94,13 @@ Initialize and seed the database:
 .\.venv\Scripts\python.exe -m cfa_vocab_bot seed data/seed_vocab.json
 ```
 
-Import the sample global timeline:
+Optionally test the timeline importer from the CLI:
 
 ```powershell
 .\.venv\Scripts\python.exe -m cfa_vocab_bot import-timeline data/sample_timeline.csv
 ```
+
+Telegram users normally create a personal plan by uploading a CSV/JSON timeline in chat or by using `/learning-setting <topic> <weeks>`.
 
 Run the bot:
 
@@ -155,7 +159,7 @@ CSV lists can be comma- or semicolon-separated. JSON can be a list or an object 
 
 ## Telegram Usage
 
-After `/start`, upload a CSV or JSON timeline in Telegram. The bot imports it for that user and maps the current date to the current CFA topic.
+After `/start`, upload a CSV or JSON timeline in Telegram or build a plan with `/learning-setting <topic> <weeks>`. The bot stores the plan for that user and maps the current date to the current CFA topic.
 
 Examples:
 
@@ -165,7 +169,14 @@ Examples:
 /settings daily_vocab_count 5
 /settings exam_date 2027-02-20
 /topics-display
+/learning-setting Quantitative Methods 2
+/subtopic-add Time Value of Money
+/subtopic-list
+/learning-setting Fixed Income 3
+/skip
+/reset
 /research Fixed Income 10
+/research Quantitative Methods - Hypothesis Testing 10
 /export csv
 /export anki
 /error duration convexity callable bond
@@ -184,6 +195,20 @@ Callback data is intentionally short, for example `know:123`, `review:123`, and 
 
 `/topics-display` shows all active approved vocab topics already available in the pool, with word counts. Telegram's official command menu only supports letters, numbers, and underscores, so `/topics_display` is registered in the menu and `/topics-display` is supported as a typed alias.
 
+`/learning-setting <topic> <weeks>` appends that topic directly to your personal `study_plan`, for example `/learning-setting Quantitative Methods 2` followed by `/learning-setting Financial Statement Analysis 3` creates two Quant weeks and then three Financial Statement Analysis weeks. If your plan is empty, the first row starts on the Monday of your current local week; otherwise it starts after the last planned week. With no arguments, it displays your current `study_plan`. Telegram's command menu registers `/learning_setting`, and `/learning-setting` is supported as a typed alias.
+
+The topic is validated against the approved vocab pool shown by `/topics-display`. Exact matches are stored with the canonical topic name. If the topic looks misspelled, the bot suggests the closest topic and does not write to `study_plan` until you rerun `/learning-setting` with the corrected topic.
+
+`/subtopic-add <subtopic>` adds a focus area to the current active study-plan week, for example `/subtopic-add Time Value of Money`. `/subtopic-list` displays the current week's sub-topics. `/subtopic-clear` removes them from the current week. Telegram's command menu registers `/subtopic_add`, `/subtopic_list`, and `/subtopic_clear`; the hyphen commands are supported as typed aliases.
+
+Daily vocab selection now uses sub-topics as a priority layer: terms matching the current week's sub-topics are delivered first, then the bot fills from the main topic, then from the broader approved pool if needed.
+
+`/reset` clears your personal `study_plan` so you can build a fresh sequence. It also clears the saved topic pacing rows used by `/learning-setting`, because the MVP treats those rows as derived setup data for the plan.
+
+`/skip` keeps the current study week in place, removes the remaining future weeks for the current topic, and shifts the next planned topic forward. Example: if you are in week 1 of a two-week Quantitative Methods block followed by Financial Statement Analysis, `/skip` removes the second Quant week so Financial Statement Analysis becomes next week.
+
+When your current plan has 2 days or fewer left and there is no planned next week, the scheduler sends a reminder to extend the plan with `/learning-setting <topic> <weeks>`.
+
 ## Research Workflow
 
 `/research <topic> <number>` calls the OpenAI Responses API with web search enabled. The prompt asks the model to search public CFA Level I-relevant resources, prioritize useful terms for the requested topic, avoid verbatim paid/copyrighted explanations, and return structured candidates with source tracking.
@@ -192,6 +217,7 @@ Example:
 
 ```text
 /research Fixed Income 10
+/research Quantitative Methods - Hypothesis Testing 10
 ```
 
 The bot then:
@@ -200,7 +226,7 @@ The bot then:
 2. Asks OpenAI to avoid those existing terms before generating candidates.
 3. Requests extra candidates and retries when duplicate filtering leaves fewer than the requested count.
 4. Removes terms already covered by `vocab_items`, aliases, or pending suggestions.
-5. Saves remaining terms to `research_suggestions` with `status = suggested`.
+5. Saves remaining terms to `research_suggestions` with `status = suggested`, keeping the main topic and optional sub-topic separated.
 6. Shows a compact suggestion list with Approve/Reject buttons.
 7. Creates an active `vocab_items` row only when you approve a suggestion.
 
@@ -240,6 +266,7 @@ Covered core logic:
 - Quiz generation and grading.
 - CSV and Anki export.
 - Quiet-hours and exam-phase scheduling rules.
+- User-built study-plan appending, reset, skip, and extension alerts.
 
 ## Docker
 
@@ -271,5 +298,6 @@ SQLite is persisted through the `./data:/app/data` volume.
 - Google Sheet import is represented as CSV import for MVP because the spec allows CSV/JSON and the user request explicitly asks for CSV or JSON support.
 - LLM integration is a clean interface, not a hard dependency, so delivery never fails because an API key is missing.
 - Research suggestions are stored separately from active vocab because the user explicitly approves which words enter the learning pool.
+- `/learning-setting` writes concrete weekly rows instead of storing only preferences, because that makes future delivery deterministic and visible through `/topic`, `/nextweek`, and the scheduler.
 - The admin API is intentionally small: health, readiness, and protected user progress.
 - The weekly quiz uses a custom inline-button flow instead of Telegram native polls so the app can persist `response_time_seconds`, explanations, weak-term updates, and adaptive review state.

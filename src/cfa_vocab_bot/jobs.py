@@ -12,6 +12,11 @@ from cfa_vocab_bot.services.content_engine import (
     terms_due_for_mini_review,
     weak_vocab,
 )
+from cfa_vocab_bot.services.importers import plan_for_date
+from cfa_vocab_bot.services.learning_settings import (
+    record_study_plan_extension_alert,
+    study_plan_extension_alert_message,
+)
 from cfa_vocab_bot.services.scheduling import can_send_now, local_date
 from cfa_vocab_bot.services.progress import progress_snapshot
 from cfa_vocab_bot.services.quiz import create_weekly_quiz, next_unanswered_question
@@ -162,4 +167,34 @@ async def send_weekly_recap_job(user_id: int, session_factory: sessionmaker[Sess
             session.rollback()
             logger.exception("Weekly recap job failed for user_id=%s", user_id)
             await _log_job(session, user_id, "weekly_recap", "failed", str(exc))
+            session.commit()
+
+
+async def send_plan_alert_job(user_id: int, session_factory: sessionmaker[Session], telegram_bot) -> None:
+    with session_factory() as session:
+        user = _get_user(session, user_id)
+        now = utc_now()
+        if user is None or user.paused or not can_send_now(user.settings, now):
+            return
+        try:
+            today = local_date(user.settings, now)
+            message = study_plan_extension_alert_message(session, user=user, today=today)
+            if message:
+                await telegram_bot.send_message(chat_id=user.chat_id, text=message)
+                current = plan_for_date(session, user.id, today)
+                if current is not None:
+                    record_study_plan_extension_alert(
+                        session,
+                        user=user,
+                        current_plan=current,
+                        today=today,
+                    )
+                await _log_job(session, user.id, "plan_alert", "sent")
+            else:
+                await _log_job(session, user.id, "plan_alert", "skipped")
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.exception("Plan alert job failed for user_id=%s", user_id)
+            await _log_job(session, user_id, "plan_alert", "failed", str(exc))
             session.commit()

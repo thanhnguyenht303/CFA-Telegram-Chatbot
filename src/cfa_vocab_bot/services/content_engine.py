@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Sequence
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, not_, or_, select
+from sqlalchemy import Select, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from cfa_vocab_bot.models import DeliveryLog, ReviewState, StudyPlan, User, VocabItem, utc_now
@@ -55,6 +56,21 @@ def _topic_match(topic: str):
     return or_(VocabItem.topic == topic, VocabItem.tags.contains([topic]))
 
 
+def _normalize_subtopic_match(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().casefold())
+
+
+def _subtopic_match(subtopics: Sequence[str]):
+    normalized = [_normalize_subtopic_match(subtopic) for subtopic in subtopics if subtopic.strip()]
+    return func.lower(VocabItem.subtopic).in_(normalized)
+
+
+def _exclude_ids(query: Select[tuple[VocabItem]], ids: set[int]) -> Select[tuple[VocabItem]]:
+    if not ids:
+        return query
+    return query.where(not_(VocabItem.id.in_(ids)))
+
+
 def select_daily_vocab(
     session: Session,
     user: User,
@@ -69,16 +85,31 @@ def select_daily_vocab(
 
     query = _approved_vocab_query().where(not_(VocabItem.id.in_(sent)))
     if plan:
-        topic_query = query.where(_topic_match(plan.main_topic)).order_by(
-            VocabItem.priority_score.desc(), VocabItem.id.asc()
-        )
-        vocab = list(session.scalars(topic_query.limit(count)).all())
+        vocab: list[VocabItem] = []
+        seen_ids: set[int] = set()
+
+        if plan.subtopics:
+            subtopic_query = query.where(
+                _topic_match(plan.main_topic),
+                _subtopic_match(plan.subtopics),
+            ).order_by(VocabItem.priority_score.desc(), VocabItem.id.asc())
+            vocab = list(session.scalars(subtopic_query.limit(count)).all())
+            seen_ids = {item.id for item in vocab}
         if len(vocab) >= count:
             return plan, vocab
-        seen_ids = {item.id for item in vocab}
+
+        topic_query = _exclude_ids(query, seen_ids).where(_topic_match(plan.main_topic)).order_by(
+            VocabItem.priority_score.desc(), VocabItem.id.asc()
+        )
+        topic_vocab = list(session.scalars(topic_query.limit(count - len(vocab))).all())
+        vocab.extend(topic_vocab)
+        seen_ids.update(item.id for item in topic_vocab)
+        if len(vocab) >= count:
+            return plan, vocab
+
         fallback = list(
             session.scalars(
-                query.where(not_(VocabItem.id.in_(seen_ids))).order_by(
+                _exclude_ids(query, seen_ids).order_by(
                     VocabItem.priority_score.desc(), VocabItem.id.asc()
                 )
             )

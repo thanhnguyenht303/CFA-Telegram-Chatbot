@@ -11,12 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from cfa_vocab_bot.jobs import (
     send_daily_vocab_job,
     send_mini_review_job,
+    send_plan_alert_job,
     send_weekly_quiz_job,
     send_weekly_recap_job,
 )
 from cfa_vocab_bot.models import User
 
-ALERT_JOB_TYPES = ("daily_vocab", "mini_review", "weekly_quiz", "weekly_recap")
+ALERT_JOB_TYPES = ("daily_vocab", "mini_review", "weekly_quiz", "weekly_recap", "plan_alert")
 
 
 def _cron_for_time(*, timezone: str, at: dt.time, day_of_week: str | int | None = None) -> CronTrigger:
@@ -91,6 +92,15 @@ def schedule_user_jobs(
             day_of_week=settings.weekly_recap_day,
         ),
         id=_user_job_id(user.id, "weekly_recap"),
+        replace_existing=True,
+        kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        send_plan_alert_job,
+        _cron_for_time(timezone=settings.timezone, at=settings.daily_send_time),
+        id=_user_job_id(user.id, "plan_alert"),
         replace_existing=True,
         kwargs={"user_id": user.id, "session_factory": session_factory, "telegram_bot": telegram_bot},
         max_instances=1,

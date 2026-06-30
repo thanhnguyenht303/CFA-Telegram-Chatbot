@@ -18,6 +18,5 @@ def test_import_timeline_and_export(session, user, seeded, current_week_csv):
     session.commit()
     csv_data = export_vocab_csv(session, user)
     anki = export_anki_tsv(session, user)
-    assert "Revenue recognition" in csv_data
+    assert "Operating cash flow" in csv_data
     assert "\t" in anki
-

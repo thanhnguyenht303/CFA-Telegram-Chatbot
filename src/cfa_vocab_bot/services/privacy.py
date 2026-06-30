@@ -13,6 +13,7 @@ from cfa_vocab_bot.models import (
     SchedulerJob,
     StudyPlan,
     SystemEvent,
+    TopicLearningSetting,
     User,
 )
 
@@ -29,4 +30,5 @@ def delete_user_data(session: Session, user: User) -> None:
     session.execute(delete(SchedulerJob).where(SchedulerJob.user_id == user.id))
     session.execute(delete(SystemEvent).where(SystemEvent.user_id == user.id))
     session.execute(delete(StudyPlan).where(StudyPlan.user_id == user.id))
+    session.execute(delete(TopicLearningSetting).where(TopicLearningSetting.user_id == user.id))
     session.delete(user)

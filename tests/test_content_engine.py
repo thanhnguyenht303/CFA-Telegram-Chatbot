@@ -28,3 +28,17 @@ def test_needs_review_vocab_is_not_selected(session, user, seeded, current_week_
     session.commit()
     _plan, vocab = select_daily_vocab(session, user, today=dt.date(2026, 6, 24), count=25)
     assert item not in vocab
+
+
+def test_daily_selection_prefers_current_plan_subtopics(session, user, seeded, current_week_csv):
+    import_timeline(session, user_id=user.id, path=current_week_csv)
+    session.commit()
+
+    _plan, vocab = select_daily_vocab(session, user, today=dt.date(2026, 6, 24), count=4)
+
+    assert [item.term for item in vocab] == [
+        "Operating cash flow",
+        "Ratio analysis",
+        "Gross profit margin",
+        "Capital expenditure",
+    ]

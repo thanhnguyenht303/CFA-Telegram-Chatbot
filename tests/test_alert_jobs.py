@@ -12,6 +12,7 @@ from cfa_vocab_bot import jobs
 from cfa_vocab_bot.jobs import (
     send_daily_vocab_job,
     send_mini_review_job,
+    send_plan_alert_job,
     send_weekly_quiz_job,
     send_weekly_recap_job,
 )
@@ -19,6 +20,7 @@ from cfa_vocab_bot.models import DeliveryLog, QuizQuestion, QuizResult, ReviewSt
 from cfa_vocab_bot.scheduler import schedule_user_jobs
 from cfa_vocab_bot.services.content_engine import record_vocab_delivery, select_daily_vocab
 from cfa_vocab_bot.services.importers import import_timeline
+from cfa_vocab_bot.services.learning_settings import append_topic_to_study_plan
 
 
 class FakeBot:
@@ -62,6 +64,7 @@ def test_schedule_user_jobs_registers_expected_alert_times(session_factory, user
     expected_ids = {
         f"user:{user.id}:daily_vocab",
         f"user:{user.id}:mini_review",
+        f"user:{user.id}:plan_alert",
         f"user:{user.id}:weekly_quiz",
         f"user:{user.id}:weekly_recap",
     }
@@ -69,6 +72,9 @@ def test_schedule_user_jobs_registers_expected_alert_times(session_factory, user
 
     base = dt.datetime(2026, 6, 26, 12, 0, tzinfo=dt.UTC)
     assert scheduler.get_job(f"user:{user.id}:daily_vocab").trigger.get_next_fire_time(
+        None, base
+    ).astimezone(dt.UTC) == dt.datetime(2026, 6, 26, 12, 30, tzinfo=dt.UTC)
+    assert scheduler.get_job(f"user:{user.id}:plan_alert").trigger.get_next_fire_time(
         None, base
     ).astimezone(dt.UTC) == dt.datetime(2026, 6, 26, 12, 30, tzinfo=dt.UTC)
     assert scheduler.get_job(f"user:{user.id}:mini_review").trigger.get_next_fire_time(
@@ -94,7 +100,7 @@ def test_schedule_user_jobs_replaces_and_removes_runtime_jobs(session_factory, u
         None, base
     )
     assert next_daily.astimezone(dt.UTC) == dt.datetime(2026, 6, 26, 13, 15, tzinfo=dt.UTC)
-    assert len(scheduler.get_jobs()) == 4
+    assert len(scheduler.get_jobs()) == 5
 
     user.paused = True
     schedule_user_jobs(scheduler, session_factory, FakeBot(), user)
@@ -207,3 +213,30 @@ async def test_weekly_recap_job_sends_recap_and_logs(
     assert len(bot.messages) == 1
     assert "Weekly CFA Vocab Recap" in str(bot.messages[0]["text"])
     assert _job_count(session, "weekly_recap", "sent") == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_alert_job_sends_once_when_current_plan_has_no_next_week(
+    session_factory,
+    session,
+    user,
+    monkeypatch,
+):
+    append_topic_to_study_plan(
+        session,
+        user=user,
+        topic="Quantitative Methods",
+        weeks=1,
+        today=dt.date(2026, 6, 22),
+    )
+    session.commit()
+    monkeypatch.setattr(jobs, "utc_now", lambda: dt.datetime(2026, 6, 26, 12, 30, tzinfo=dt.UTC))
+    bot = FakeBot()
+
+    await send_plan_alert_job(user.id, session_factory, bot)
+    await send_plan_alert_job(user.id, session_factory, bot)
+
+    assert len(bot.messages) == 1
+    assert "No topic is planned for next week yet" in str(bot.messages[0]["text"])
+    assert _job_count(session, "plan_alert", "sent") == 1
+    assert _job_count(session, "plan_alert", "skipped") == 1
